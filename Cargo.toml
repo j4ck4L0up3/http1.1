@@ -1,8 +1,4 @@
-[package]
-name = "http1_1"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["tcp_listener"]
 
-[dependencies]
-httparse = "1.10.1"
-tokio = { version="1.53.1", features=["full"] }

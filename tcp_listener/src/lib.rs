@@ -1,10 +1,35 @@
 use std::{
 	io::{prelude::*, BufReader},
-	net::TcpStream,
+	net::{TcpListener, TcpStream},
 	sync::mpsc::{self, Receiver, Sender},
 };
 
-pub fn get_lines_channel(mut stream: TcpStream) -> Receiver<String> {
+pub fn serve() {
+	let listener = match TcpListener::bind("127.0.0.1:7878") {
+		Ok(l) => l,
+		Err(err) => panic!("Could not start TCP server {err:?}"),
+	};
+
+	for stream in listener.incoming() {
+		let stream = match stream {
+			Ok(s) => s,
+			Err(err) => panic!("Could not connect to TCP stream {err:?}"),
+		};
+
+		println!("Connection received!");
+		let rx = get_lines_channel(stream);
+		let msg = rx.recv();
+
+		match msg {
+			Ok(msg) => println!("{msg}"),
+			Err(err) => panic!("Could not receive msg: {err}"),
+		};
+	}
+
+	println!("Connection closed!");
+}
+
+fn get_lines_channel(mut stream: TcpStream) -> Receiver<String> {
 	let (tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel();
 
 	let mut reader = BufReader::with_capacity(8, &mut stream);
