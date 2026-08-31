@@ -1,6 +1,6 @@
 use std::{
 	io::{prelude::*, BufReader},
-	net::{TcpListener, TcpStream},
+	net::{TcpListener},
 };
 use tokio::{
 	runtime::Runtime,
@@ -13,11 +13,13 @@ pub fn serve(rt: Runtime) {
 		Err(err) => panic!("Could not start TCP server {err:?}"),
 	};
 
+	// NOTE: taking only one connection for testing purposes
 	for stream in listener.incoming().take(1) {
 		let stream = match stream {
 			Ok(s) => s,
 			Err(err) => panic!("Could not connect to TCP stream {err:?}"),
 		};
+
 
 		println!("Connection received!");
 		rt.block_on(
@@ -50,7 +52,7 @@ pub fn serve(rt: Runtime) {
 	println!("Connection closed!");
 }
 
-async fn get_lines_channel(mut stream: TcpStream, tx: Sender<String>) {
+async fn get_lines_channel<T: Read>(mut stream: T, tx: Sender<String>) {
 	let mut reader = BufReader::with_capacity(8, &mut stream);
 	let mut curr_line = String::new();
 
