@@ -1,3 +1,9 @@
+use tokio::runtime::Runtime;
+
 fn main() {
-	tcp_listener::serve();
+	let rt = match Runtime::new() {
+		Ok(run) => run,
+		Err(err) => panic!("Could not start async runtime: {err}"),
+	};
+	tcp_listener::serve(rt);
 }
