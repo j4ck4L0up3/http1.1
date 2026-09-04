@@ -3,20 +3,24 @@ pub mod method;
 
 use http_error::HttpParseError;
 use method::Method;
-use std::io::{self, BufReader, Cursor, prelude::*};
+use std::{
+	io::{BufReader, prelude::*},
+	fmt,
+};
 
 const HTTP_VERSION: &str = "1.1";
 const BUFFER_SIZE: usize = 8;
 
 #[derive(PartialEq, Clone, Debug)]
-enum ParseState {
+pub enum ParseState {
 	Initialized,
 	Done,
 }
 
-struct Request {
-	request_line: Option<RequestLine>,
-	state: ParseState,
+#[derive(Debug)]
+pub struct Request {
+	pub request_line: Option<RequestLine>,
+	pub state: ParseState,
 }
 
 impl Request {
@@ -40,7 +44,7 @@ impl Request {
 			
 			read_idx += read;
 
-			let parsed = match &mut request.parse(&mut buffer) {
+			let parsed = match &mut request.parse(&buffer[..read_idx]) {
 				Ok(p) => *p,
 				Err(err) => return Err(*err),
 			};
@@ -65,7 +69,7 @@ impl Request {
 		Request { request_line: None, state: ParseState::Initialized }
 	}
 
-	fn parse(&mut self, data: &mut Vec<u8>) -> Result<usize, HttpParseError> {
+	fn parse(&mut self, data: &[u8]) -> Result<usize, HttpParseError> {
 		let mut bytes_read: usize = 0;
 
 		if self.state == ParseState::Initialized {
@@ -93,15 +97,15 @@ impl Request {
 	}
 }
 
-#[derive(PartialEq, Debug)]
-struct RequestLine {
-	method: Method,
-	request_target: String,
-	http_version: String,
+#[derive(PartialEq, Clone, Debug)]
+pub struct RequestLine {
+	pub method: Method,
+	pub request_target: String,
+	pub http_version: String,
 }
 
 impl RequestLine {
-	fn parse(data: &mut Vec<u8>) -> Result<(Option<RequestLine>, usize), HttpParseError> {
+	fn parse(data: &[u8]) -> Result<(Option<RequestLine>, usize), HttpParseError> {
 		let mut parsed: usize = 0;
 		let buf = match String::from_utf8(data.to_vec()) {
 			Ok(b) => b,
@@ -148,6 +152,18 @@ impl RequestLine {
 		parsed += parts[0].len();
 
 		Ok((Some(request_line), parsed))
+	}
+}
+
+impl fmt::Display for RequestLine {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(
+			f,
+			"Request Line:\n- Method: {}\n- Target: {}\n- Version: {}\n",
+			self.method,
+			self.request_target,
+			self.http_version,
+		)
 	}
 }
 

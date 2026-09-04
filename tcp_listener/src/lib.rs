@@ -1,86 +1,39 @@
-use std::{
-	io::{prelude::*, BufReader},
-	net::{TcpListener},
-};
-use tokio::{
-	runtime::Runtime,
-	sync::mpsc::{self, Receiver, Sender},
-};
+use request::{ParseState, Request};
+use std::{io::BufReader, net::TcpListener};
 
-pub fn serve(rt: Runtime) {
+pub fn serve() {
 	let listener = match TcpListener::bind("127.0.0.1:7878") {
 		Ok(l) => l,
 		Err(err) => panic!("Could not start TCP server {err:?}"),
 	};
 
-	// NOTE: taking only one connection for testing purposes
-	for stream in listener.incoming().take(1) {
+	for stream in listener.incoming() {
 		let stream = match stream {
 			Ok(s) => s,
 			Err(err) => panic!("Could not connect to TCP stream {err:?}"),
 		};
 
-
 		println!("Connection received!");
-		rt.block_on(
-			async {
-				let (tx, mut rx): (Sender<String>, Receiver<String>) = mpsc::channel(8);
 
-				let tx_handle = rt.spawn(get_lines_channel(stream, tx));
+		let reader = BufReader::new(stream);
+		let request = match Request::from_reader(reader) {
+			Ok(req) => req,
+			Err(err) => panic!("Error with parsed request {err}"),
+		};
 
-				let rx_handle = rt.spawn(
-					async move {
-						while let Some(msg) = rx.recv().await {
-							print!("{msg}");
-						}
-					}
-				);
+		let request_line = match request.request_line {
+			Some(line) => line,
+			None => panic!("No request line found"),
+		};
 
-				match tx_handle.await {
-					Ok(_) => (),
-					Err(err) => panic!("Couldn't await sender: {err}"),
-				};
+		println!("{request_line}");
 
-				match rx_handle.await {
-					Ok(_) => (),
-					Err(err) => panic!("Couldn't await receiver: {err}"),
-				};
-			}
-		);
+		if request.state == ParseState::Done {
+			break;
+		}
 	}
 
 	println!("Connection closed!");
-}
-
-async fn get_lines_channel<T: Read>(mut stream: T, tx: Sender<String>) {
-	let mut reader = BufReader::with_capacity(8, &mut stream);
-	let mut curr_line = String::new();
-
-	loop {
-		let mut part = String::new();
-
-		let _ = reader.read_line(&mut curr_line);
-
-		if curr_line.is_empty() {
-			break;
-		}
-
-		if curr_line.contains("\n") {
-			let part_end = match curr_line.find("\n") {
-				Some(idx) => idx,
-				None => break,
-			};
-
-			let mut segment = curr_line;
-			curr_line = segment.split_off(part_end + 1); // split_off is not inclusive
-			part.push_str(segment.as_str());
-		}
-
-		match tx.send(part).await {
-			Ok(_) => (),
-			Err(err) => panic!("Could not send part of message: {err}"),
-		}
-	}
 }
 
 #[cfg(test)]
