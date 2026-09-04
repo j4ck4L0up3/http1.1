@@ -3,9 +3,10 @@ pub mod method;
 
 use http_error::HttpParseError;
 use method::Method;
-use std::io::{BufReader, Cursor, prelude::*};
+use std::io::{self, BufReader, Cursor, prelude::*};
 
 const HTTP_VERSION: &str = "1.1";
+const BUFFER_SIZE: usize = 8;
 
 #[derive(PartialEq, Clone, Debug)]
 enum ParseState {
@@ -20,62 +21,55 @@ struct Request {
 
 impl Request {
 	pub fn from_reader<T: Read>(mut reader: BufReader<T>) -> Result<Request, HttpParseError> {
+		let mut request = Request::new(); 
 
-		Ok(Request { request_line })
-		/* let mut curr_line = String::new();
-		let mut part = String::new();
+		let mut buffer: Vec<u8> = vec![0u8; BUFFER_SIZE];
+		let mut read_idx: usize = 0;
+		let mut shift: usize = 1;
 
-		loop {
-			let _ = reader.read_line(&mut curr_line);
+		while request.state != ParseState::Done {
 
-			if curr_line.is_empty() {
+			let read = match reader.read(&mut buffer[read_idx..]) {
+				Ok(n) => n,
+				Err(_) => return Err(HttpParseError::RequestLineParseError),
+			};
+
+			if read == 0 {
 				break;
 			}
+			
+			read_idx += read;
 
-			if curr_line.contains("Content-Length") {
-				let header: Vec<&str> = curr_line.split(" ").collect();
-				if let Some(length) = header[1].strip_suffix("\r\n") {
-					let content_len: usize = match length.parse() {
-						Ok(len) => len,
-						Err(_) => return Err(HttpParseError::BadHeader(curr_line)),
-					};
+			let parsed = match &mut request.parse(&mut buffer) {
+				Ok(p) => *p,
+				Err(err) => return Err(*err),
+			};
 
-					let mut body = vec![0u8; content_len];
-					let _ = reader.read_exact(&mut body);
-					let _body_str = String::from_utf8(body);
-				}
-				break;
+			if parsed == 0 && read_idx == buffer.len() {
+				let buffer_size = BUFFER_SIZE << shift;
+				buffer.resize(buffer_size, 0);
+				shift += 1;
 			}
 
-			if curr_line.contains("\n") {
-				let part_end = match curr_line.find("\n") {
-					Some(idx) => idx,
-					None => break,
-				};
+			if parsed > 0 {
+				read_idx -= parsed;
 
-				let mut segment = curr_line;
-				curr_line = segment.split_off(part_end + 1); // split_off is not inclusive
-				part.push_str(segment.as_str());
 			}
+			
 		}
 
-		let lines: Vec<&str> = part.split("\r\n").collect();
-		let raw_req_line: Vec<&str> = lines[0].split(" ").collect(); */
-
+		Ok(request)
 	}
 
 	fn new() -> Request {
 		Request { request_line: None, state: ParseState::Initialized }
 	}
 
-	fn parse(mut self, data: &[u8]) -> Result<usize, HttpParseError> {
-		let cursor = Cursor::new(data);
-		let reader = BufReader::new(cursor);
-
+	fn parse(&mut self, data: &mut Vec<u8>) -> Result<usize, HttpParseError> {
 		let mut bytes_read: usize = 0;
 
 		if self.state == ParseState::Initialized {
-			let parsed_req_line: (Option<RequestLine>, usize) = match RequestLine::parse(reader) {
+			let parsed_req_line: (Option<RequestLine>, usize) = match RequestLine::parse(data) {
 				Ok(p) => p,
 				Err(err) => return Err(err),
 			};
@@ -107,19 +101,19 @@ struct RequestLine {
 }
 
 impl RequestLine {
-	fn parse<T: Read>(mut reader: BufReader<T>) -> Result<(Option<RequestLine>, usize), HttpParseError> {
-		let mut buf = String::new();
-		let bytes_read = reader.read_line(&mut buf).unwrap_or_default();
-
-		if bytes_read == 0 {
-			return Ok((None, 0));
-		}
+	fn parse(data: &mut Vec<u8>) -> Result<(Option<RequestLine>, usize), HttpParseError> {
+		let mut parsed: usize = 0;
+		let buf = match String::from_utf8(data.to_vec()) {
+			Ok(b) => b,
+			Err(_) => return Err(HttpParseError::RequestLineParseError),
+		};
 
 		if !buf.contains("\r\n") {
 			return Ok((None, 0));
 		}
 
-		let raw_req_line: Vec<&str> = buf.split(" ").collect();
+		let parts: Vec<&str> = buf.split("\r\n").collect();
+		let raw_req_line: Vec<&str> = parts[0].split(" ").collect();
 
 		let method = match Method::parse(raw_req_line[0]) {
 			Ok(m) => m,
@@ -151,7 +145,9 @@ impl RequestLine {
 			http_version,
 		};
 
-		Ok((Some(request_line), bytes_read))
+		parsed += parts[0].len();
+
+		Ok((Some(request_line), parsed))
 	}
 }
 
