@@ -11,6 +11,8 @@ pub enum HttpParseError {
 	NoColonInHeader,
 	InvalidHeaderWhitespace,
 	InvalidHeaderChars,
+	InvalidDuplicateHeader,
+	EmptyFieldValue,
 	ReadingDoneParser,
 	UnknownParserState,
 }
@@ -31,6 +33,10 @@ impl fmt::Display for HttpParseError {
 				write!(f, "whitespace passed in request header field name")
 			}
 			HttpParseError::InvalidHeaderChars => write!(f, "invalid character passed in header"),
+			HttpParseError::InvalidDuplicateHeader => {
+				write!(f, "invalid duplicate header passed in request")
+			}
+			HttpParseError::EmptyFieldValue => write!(f, "empty field value passed in header"),
 			HttpParseError::ReadingDoneParser => write!(f, "reading when parser is in done state"),
 			HttpParseError::UnknownParserState => write!(f, "unknown parser state"),
 		}
