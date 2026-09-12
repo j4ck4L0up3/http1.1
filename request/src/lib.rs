@@ -1,25 +1,32 @@
 pub mod http_error;
 pub mod method;
+pub mod headers;
 mod request_line;
 
+use method::Method;
+use headers::Headers;
 use http_error::HttpParseError;
 use request_line::RequestLine;
 use std::{
 	io::{BufReader, prelude::*},
 };
 
-const HTTP_VERSION: &str = "1.1";
+pub const HTTP_VERSION: &str = "1.1";
 const BUFFER_SIZE: usize = 8;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum ParseState {
 	Initialized,
+	ParsingHeaders,
 	Done,
 }
 
 #[derive(Debug)]
 pub struct Request {
-	pub request_line: Option<RequestLine>,
+	pub method: Option<Method>,
+	pub request_target: Box<str>,
+	pub http_version: Box<str>,
+	pub headers: Headers,
 	pub state: ParseState,
 }
 
@@ -39,6 +46,9 @@ impl Request {
 			};
 
 			if read == 0 {
+				if request.state == ParseState::ParsingHeaders {
+					return Err(HttpParseError::MissingEndOfHeaders);
+				}
 				break;
 			}
 			
@@ -56,8 +66,8 @@ impl Request {
 			}
 
 			if parsed > 0 {
+				buffer.copy_within(parsed..read_idx, 0);
 				read_idx -= parsed;
-
 			}
 			
 		}
@@ -66,7 +76,13 @@ impl Request {
 	}
 
 	fn new() -> Request {
-		Request { request_line: None, state: ParseState::Initialized }
+		Request { 
+			method: None,
+			request_target: String::new().into_boxed_str(),
+			http_version: String::new().into_boxed_str(),
+			headers: Headers::new(),
+			state: ParseState::Initialized
+		}
 	}
 
 	fn parse(&mut self, data: &[u8]) -> Result<usize, HttpParseError> {
@@ -85,8 +101,26 @@ impl Request {
 			assert!(parsed_req_line.0 != None);
 
 			bytes_read += parsed_req_line.1;
-			self.request_line = parsed_req_line.0;
-			self.state = ParseState::Done;
+			
+			if let Some(request_line) = parsed_req_line.0 {
+				self.method = request_line.method;
+				self.request_target = request_line.request_target;
+				self.http_version = request_line.http_version;
+			}
+
+			self.state = ParseState::ParsingHeaders;
+		} else if self.state == ParseState::ParsingHeaders {
+			let results: (usize, bool) = match self.headers.parse(data) {
+				Ok(tup) => tup,
+				Err(err) => return Err(err),
+			};
+			
+			bytes_read += results.0;
+			let done = results.1;
+
+			if done && bytes_read > 0 {
+				self.state = ParseState::Done;
+			}
 		} else if self.state == ParseState::Done {
 			return Err(HttpParseError::ReadingDoneParser);
 		} else {
@@ -124,6 +158,7 @@ mod tests {
 			let chunk = &self.data[self.pos..end_index];
 			let n = chunk.len();
 			self.pos += n;
+
 			buf[..n].copy_from_slice(&chunk);
 
 			Ok(n)
@@ -148,11 +183,14 @@ mod tests {
 				Err(err) => panic!("expected request, got error: {err}"),
 			};
 
-			let req_line = request.request_line.unwrap();
+			let headers = request.headers;
 
-			assert_eq!(Method::GET, req_line.method);
-			assert_eq!("/", req_line.request_target);
-			assert_eq!(HTTP_VERSION, req_line.http_version);
+			assert_eq!(Method::GET, request.method.unwrap());
+			assert_eq!("/", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+			assert_eq!(headers.get("host"), "localhost:7878");
+			assert_eq!(headers.get("user-agent"), "curl/7.81.0");
+			assert_eq!(headers.get("accept"), "*/*");
 		}
 	}
 
@@ -174,18 +212,21 @@ mod tests {
 				Err(err) => panic!("expected request, got error: {err}"),
 			};
 
-			let req_line = request.request_line.unwrap();
+			let headers = request.headers;
 
-			assert_eq!(Method::GET, req_line.method);
-			assert_eq!("/coffee", req_line.request_target);
-			assert_eq!(HTTP_VERSION, req_line.http_version);
+			assert_eq!(Method::GET, request.method.unwrap());
+			assert_eq!("/coffee", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+			assert_eq!(headers.get("host"), "localhost:7878");
+			assert_eq!(headers.get("user-agent"), "curl/7.81.0");
+			assert_eq!(headers.get("accept"), "*/*");
 		}
 	}
 
 	#[test]
 	fn good_post_request_line() {
 		let request_line = 
-			b"POST /coffee HTTP/1.1\r\nhost: localhost:7878\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 22\r\n{\"flavor\":\"dark mode\"}";
+			b"POST /coffee HTTP/1.1\r\nHost: localhost:7878\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 22\r\n\r\n{\"flavor\":\"dark mode\"}";
 
 		for i in 1..request_line.len() {
 			let reader = ChunkReader {
@@ -200,14 +241,74 @@ mod tests {
 				Err(err) => panic!("expected request, got error: {err}"),
 			};
 
-			let req_line = request.request_line.unwrap();
+			let headers = request.headers;
 
-			assert_eq!(Method::POST, req_line.method);
-			assert_eq!("/coffee", req_line.request_target);
-			assert_eq!(
-				String::from(HTTP_VERSION),
-				req_line.http_version
-			);
+			assert_eq!(Method::POST, request.method.unwrap());
+			assert_eq!("/coffee", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+			assert_eq!(headers.get("host"), "localhost:7878");
+			assert_eq!(headers.get("user-agent"), "curl/7.81.0");
+			assert_eq!(headers.get("accept"), "*/*");
+			assert_eq!(headers.get("content-type"), "application/json");
+			assert_eq!(headers.get("content-length"), "22");
+		}
+	}
+
+	#[test]
+	fn valid_duplicate_headers() {
+		let request_line = 
+			b"GET /coffee HTTP/1.1\r\nHost: localhost:7878\r\nSet-Cookie: very=cool\r\nSet-Cookie: nice=guy\r\n\r\n";
+
+		for i in 1..request_line.len() {
+			let reader = ChunkReader {
+				data: request_line,
+				bytes_per_read: i,
+				pos: 0,
+			};
+			let reader = BufReader::new(reader);
+
+			let request = match Request::from_reader(reader) {
+				Ok(req) => req,
+				Err(err) => panic!("expected request, got error: {err}"),
+			};
+
+			let headers = request.headers;
+
+			assert_eq!(Method::GET, request.method.unwrap());
+			assert_eq!("/coffee", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+			assert_eq!(headers.get("host"), "localhost:7878");
+			assert_eq!(headers.get("set-cookie"), "very=cool, nice=guy");
+		}
+	}
+
+	#[test]
+	fn valid_case_insensitive_headers() {
+		let request_line = 
+			b"GET /coffee HTTP/1.1\r\nHOST: localhost:7878\r\nset-CooKie: very=cool\r\nSET-cookie: nice=guy\r\n\r\n";
+
+		for i in 1..request_line.len() {
+			let reader = ChunkReader {
+				data: request_line,
+				bytes_per_read: i,
+				pos: 0,
+			};
+			let reader = BufReader::new(reader);
+
+			let request = match Request::from_reader(reader) {
+				Ok(req) => req,
+				Err(err) => panic!("expected request, got error: {err}"),
+			};
+
+			let headers = request.headers;
+
+			assert_eq!(Method::GET, request.method.unwrap());
+			assert_eq!("/coffee", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+
+			// also testing get here for case insensitivity
+			assert_eq!(headers.get("Host"), "localhost:7878"); 
+			assert_eq!(headers.get("Set-Cookie"), "very=cool, nice=guy");
 		}
 	}
 
@@ -321,5 +422,75 @@ mod tests {
 				assert_eq!(HttpParseError::WrongHttpVersion, err)
 			}
 		}
+	}
+
+	#[test]
+	fn malformed_header() {
+		let request_line =
+			b"GET / HTTP/1.1\r\nHost localhost:7878\r\n\r\n";
+
+			let reader = ChunkReader {
+				data: request_line,
+				bytes_per_read: 3,
+				pos: 0,
+			};
+			let reader = BufReader::new(reader);
+
+			let _request = match Request::from_reader(reader) {
+				Ok(req) => panic!("expected error, received: {req:?}"),
+				Err(err) => assert_eq!(HttpParseError::InvalidHeaderWhitespace, err),
+			};
+	}
+
+	#[test]
+	fn empty_header() {
+		let request_line =
+			b"GET / HTTP/1.1\r\nHost: \r\n\r\n";
+
+		let reader = BufReader::new(Cursor::new(request_line));
+
+		let _request = match Request::from_reader(reader) {
+			Ok(req) => panic!("expected error, received: {req:?}"),
+			Err(err) => assert_eq!(HttpParseError::EmptyFieldValue, err),
+		};
+	}
+
+	#[test]
+	fn invalid_duplicate_headers() {
+		let request_line1 =
+			b"GET / HTTP/1.1\r\nHost: example.com\r\nHost: localhost:7878\r\n\r\n";
+		let request_line2 =
+			b"GET / HTTP/1.1\r\nContent-Length: 10\r\nContent-Length: 78\r\n\r\n";
+
+		let reader1 = BufReader::new(Cursor::new(request_line1));
+		let reader2 = BufReader::new(Cursor::new(request_line2));
+
+		let _request1 = match Request::from_reader(reader1) {
+			Ok(req) => panic!("expected error, received: {req:?}"),
+			Err(err) => assert_eq!(HttpParseError::InvalidDuplicateHeader, err),
+		};
+		
+		let _request2 = match Request::from_reader(reader2) {
+			Ok(req) => panic!("expected error, received: {req:?}"),
+			Err(err) => assert_eq!(HttpParseError::InvalidDuplicateHeader, err),
+		};
+	}
+
+	#[test]
+	fn missing_end_of_headers() {
+		let request_line =
+			b"GET / HTTP/1.1\r\nHost: localhost:7878\r\n";
+
+			let reader = ChunkReader {
+				data: request_line,
+				bytes_per_read: 3,
+				pos: 0,
+			};
+			let reader = BufReader::new(reader);
+
+			let _request = match Request::from_reader(reader) {
+				Ok(req) => panic!("expected error, received: {req:?}"),
+				Err(err) => assert_eq!(HttpParseError::MissingEndOfHeaders, err),
+			};
 	}
 }

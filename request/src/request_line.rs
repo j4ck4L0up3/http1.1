@@ -5,25 +5,30 @@ use std::fmt;
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct RequestLine {
-	pub method: Method,
-	pub request_target: String,
-	pub http_version: String,
+	pub method: Option<Method>,
+	pub request_target: Box<str>,
+	pub http_version: Box<str>,
 }
 
 impl RequestLine {
 	pub fn parse(data: &[u8]) -> Result<(Option<RequestLine>, usize), HttpParseError> {
 		let mut parsed: usize = 0;
-		// TODO: technically must be within the US-ASCII subset for safety
+		let crlf = "\r\n";
+
 		let buf = match String::from_utf8(data.to_vec()) {
 			Ok(b) => b,
 			Err(_) => return Err(HttpParseError::RequestLineParseError),
 		};
 
-		if !buf.contains("\r\n") {
+		if !buf.is_ascii() {
+			return Err(HttpParseError::InvalidASCII);
+		}
+
+		if !buf.contains(crlf) {
 			return Ok((None, 0));
 		}
 
-		let parts: Vec<&str> = buf.split("\r\n").collect();
+		let parts: Vec<&str> = buf.split(crlf).collect();
 		let raw_req_line: Vec<&str> = parts[0].split(" ").collect();
 
 		let method = match Method::parse(raw_req_line[0]) {
@@ -37,6 +42,7 @@ impl RequestLine {
 		} else {
 			return Err(HttpParseError::MissingRequestTarget);
 		}
+		let request_target = request_target.into_boxed_str();
 
 		let version_number = match raw_req_line[2].strip_prefix("HTTP/") {
 			Some(num) => num,
@@ -49,14 +55,15 @@ impl RequestLine {
 		} else {
 			return Err(HttpParseError::WrongHttpVersion);
 		}
+		let http_version = http_version.into_boxed_str();
 
 		let request_line = RequestLine {
-			method,
+			method: Some(method),
 			request_target,
 			http_version,
 		};
 
-		parsed += parts[0].len();
+		parsed += parts[0].len() + crlf.len();
 
 		Ok((Some(request_line), parsed))
 	}
@@ -67,7 +74,9 @@ impl fmt::Display for RequestLine {
 		write!(
 			f,
 			"Request Line:\n- Method: {}\n- Target: {}\n- Version: {}\n",
-			self.method, self.request_target, self.http_version,
+			self.method.as_ref().unwrap(),
+			self.request_target,
+			self.http_version,
 		)
 	}
 }

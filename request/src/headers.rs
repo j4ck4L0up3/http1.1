@@ -1,8 +1,9 @@
-use request::http_error::HttpParseError;
+use crate::http_error::HttpParseError;
 use std::collections::HashMap;
 
+#[derive(Debug)]
 pub struct Headers {
-	field_lines: HashMap<String, Vec<String>>,
+	field_lines: HashMap<Box<str>, Vec<Box<str>>>,
 }
 
 impl Headers {
@@ -13,51 +14,51 @@ impl Headers {
 	}
 
 	pub fn get(&self, header: &str) -> String {
-		let field_values = &self.field_lines[header];
+		let field_values = &self.field_lines[&header.to_lowercase().into_boxed_str()];
 		let mut value = String::new();
 
 		if field_values.len() > 1 {
 			for i in 0..field_values.len() {
 				if i == field_values.len() - 1 {
-					value.push_str(field_values[i].as_str());
+					value.push_str(&field_values[i]);
 					break;
 				}
 
-				let val = field_values[i].clone() + ", ";
+				let val = String::from(&*field_values[i]) + ", ";
 				value.push_str(val.as_str());
 			}
 		} else {
-			value = field_values[0].clone();
+			value = String::from(&*field_values[0]);
 		}
 
 		value
 	}
 
-	pub fn set(&mut self, header: String, value: String) -> Result<(), HttpParseError> {
-		let cl = "content-length".to_string();
-		let host = "host".to_string();
+	pub fn set(&mut self, name: String, value: String) -> Result<(), HttpParseError> {
+		let cl = "content-length".to_string().into_boxed_str();
+		let host = "host".to_string().into_boxed_str();
 
-		if header.to_lowercase() == cl {
+		if name.to_lowercase() == *cl {
 			if !self.field_lines.contains_key(&cl) {
-				self.field_lines.insert(cl, vec![value]);
+				self.field_lines.insert(cl, vec![value.into_boxed_str()]);
 				return Ok(());
 			}
 
-			let values = match self.field_lines.get(cl.as_str()) {
+			let values = match self.field_lines.get(&cl) {
 				Some(v) => v,
 				None => return Err(HttpParseError::EmptyFieldValue),
 			};
 
-			if values[0] != value {
+			if *values[0] != value {
 				return Err(HttpParseError::InvalidDuplicateHeader);
 			}
 
 			return Ok(());
 		}
 
-		if header.to_lowercase() == host {
+		if name.to_lowercase() == *host {
 			if !self.field_lines.contains_key(&host) {
-				self.field_lines.insert(host, vec![value]);
+				self.field_lines.insert(host, vec![value.into_boxed_str()]);
 				return Ok(());
 			}
 
@@ -66,68 +67,99 @@ impl Headers {
 
 		self
 			.field_lines
-			.entry(header.to_lowercase())
-			.and_modify(|v| v.push(value.clone()))
-			.or_insert(vec![value]);
+			.entry(name.to_lowercase().into_boxed_str())
+			.and_modify(|v| v.push(value.clone().into_boxed_str()))
+			.or_insert(vec![value.into_boxed_str()]);
 
 		Ok(())
 	}
 
-	pub fn parse_headers(&mut self, data: &[u8]) -> Result<(usize, bool), HttpParseError> {
-		// TODO: technically must be within the US-ASCII subset for safety
+	pub fn parse(&mut self, data: &[u8]) -> Result<(usize, bool), HttpParseError> {
+		let crlf = "\r\n";
+		let idx: usize = data.len();
+		let mut parsed: usize = 0;
+		let mut done = false;
+
+		loop {
+			// find crlf and return its inclusive position
+			let idx: usize = match &data[parsed..idx]
+				.windows(crlf.len())
+				.position(|s| s == crlf.as_bytes())
+				.map(|pos| pos + crlf.len())
+			{
+				Some(i) => *i,
+				None => break,
+			};
+
+			if idx == 0 {
+				done = true;
+				break;
+			}
+
+			let p = match self.parse_header(&data[parsed..idx + parsed]) {
+				Ok(p) => p,
+				Err(err) => return Err(err),
+			};
+			parsed += p;
+
+			if p == crlf.len() {
+				done = true;
+				break;
+			}
+
+			if parsed == data.len() {
+				break;
+			}
+		}
+
+		Ok((parsed, done))
+	}
+
+	fn parse_header(&mut self, data: &[u8]) -> Result<usize, HttpParseError> {
+		let mut parsed: usize = 0;
+		let crlf = "\r\n";
+
 		let buf = match String::from_utf8(data.to_vec()) {
 			Ok(s) => s,
 			Err(_) => return Err(HttpParseError::InvalidHeaderChars),
 		};
 
-		if !buf.contains("\r\n") {
-			return Ok((0, false));
+		if !buf.is_ascii() {
+			return Err(HttpParseError::InvalidASCII);
 		}
 
-		let mut done = false;
-
-		let parts: Vec<&str> = buf.split_inclusive("\r\n").collect();
-
-		if parts[0] == "\r\n" {
-			done = true;
-			return Ok((parts[0].len(), done));
+		if buf == crlf {
+			return Ok(crlf.len());
 		}
 
-		dbg!(parts[0].len());
-
-		let (name, value) = match parts[0].split_once(" ") {
-			Some(line) => line,
-			None => return Err(HttpParseError::HeaderParseError),
-		};
-
-		let value = value.trim();
-
-		let parsed: usize = name.len() + value.len() + 3; // add one space and "\r\n" lengths
-
-		if !name.contains(":") {
-			return Err(HttpParseError::InvalidHeaderWhitespace);
-		}
-
-		let delim = match name.find(":") {
-			Some(d) => d,
+		let (name, value) = match buf.split_once(':') {
+			Some((n, v)) => (n.to_string(), v.to_string()),
 			None => return Err(HttpParseError::NoColonInHeader),
 		};
 
-		let name = &name[..delim];
+		let value = value.trim();
+		if value == "" {
+			return Err(HttpParseError::EmptyFieldValue);
+		}
 
-		if !Self::is_valid_header(name.to_string()) {
+		if name.chars().any(|c| c.is_whitespace()) {
+			return Err(HttpParseError::InvalidHeaderWhitespace);
+		}
+
+		if !Self::is_valid_header(&name) {
 			return Err(HttpParseError::InvalidHeaderChars);
 		}
 
-		let _ = match self.set(name.to_string(), value.to_string()) {
-			Ok(_) => (),
-			Err(err) => return Err(err),
-		};
+		if let Err(err) = self.set(name, value.to_string()) {
+			return Err(err);
+		}
 
-		Ok((parsed, done))
+		parsed += buf.len();
+
+		Ok(parsed)
 	}
 
-	fn is_valid_header(header: String) -> bool {
+	fn is_valid_header(header: &String) -> bool {
 		header.chars().all(|c| {
 			c.is_alphanumeric()
 				|| matches!(
@@ -147,14 +179,14 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Host: localhost:42069\r\n\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
 
-		assert!(!done);
+		assert!(done);
 		assert_eq!(headers.get("host"), "localhost:42069");
-		assert_eq!(parsed, 23);
+		assert_eq!(parsed, 25);
 	}
 
 	#[test]
@@ -162,42 +194,37 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Host:       localhost:42069\r\n\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
 
-		assert!(!done);
+		assert!(done);
 		assert_eq!(headers.get("host"), "localhost:42069");
-		assert_eq!(parsed, 23);
+		assert_eq!(parsed, 31);
 	}
 
 	#[test]
 	fn valid_two_headers_with_existing() {
 		let mut headers = Headers::new();
-		headers.field_lines = HashMap::from([
-			("Host".to_string(), vec!["localhost:42069".to_string()]),
-			("Content-Length:".to_string(), vec!["45".to_string()]),
-		]);
+
+		let name1: Box<str> = "Host".into();
+		let value1: Box<str> = "localhost:42069".into();
+		let name2: Box<str> = "Content-Length:".into();
+		let value2: Box<str> = "45".into();
+
+		headers.field_lines = HashMap::from([(name1, vec![value1]), (name2, vec![value2])]);
 		let data: &[u8] = b"Accept: application/json\r\nCache-Control: no-cache\r\n\r\n";
 
-		let (parsed1, done1) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
 
-		let (parsed2, done2) = match headers.parse_headers(&data[parsed1..]) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done1);
-		assert!(!done2);
-
+		assert!(done);
 		assert_eq!(headers.get("accept"), "application/json");
-		assert_eq!(parsed1, 26);
 		assert_eq!(headers.get("cache-control"), "no-cache");
-		assert_eq!(parsed2, 25);
+		assert_eq!(parsed, 53);
 	}
 
 	#[test]
@@ -205,7 +232,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
@@ -219,22 +246,13 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Set-Cookie: beep=boop\r\nSet-Cookie: meep=moop\r\n\r\n";
 
-		let (parsed1, done1) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
 
-		let (parsed2, done2) = match headers.parse_headers(&data[parsed1..]) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done1);
-		assert!(!done2);
-
-		assert_eq!(parsed1, 23);
-		assert_eq!(parsed2, 23);
-
+		assert!(done);
+		assert_eq!(parsed, 48);
 		assert_eq!(
 			headers.get("set-cookie"),
 			"beep=boop, meep=moop".to_string()
@@ -246,22 +264,13 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Content-Length: 23\r\nContent-Length: 23\r\n\r\n";
 
-		let (parsed1, done1) = match headers.parse_headers(data) {
+		let (parsed, done) = match headers.parse(data) {
 			Ok(tup) => tup,
 			Err(err) => panic!("expected parsed bytes, received error: {err}"),
 		};
 
-		let (parsed2, done2) = match headers.parse_headers(&data[parsed1..]) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done1);
-		assert!(!done2);
-
-		assert_eq!(parsed1, 20);
-		assert_eq!(parsed2, 20);
-
+		assert!(done);
+		assert_eq!(parsed, 42);
 		assert_eq!(headers.get("content-length"), "23");
 	}
 
@@ -270,7 +279,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"       Host: localhost:42069\r\n\r\n";
 
-		let _ = match headers.parse_headers(data) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidHeaderWhitespace, err),
 		};
@@ -281,7 +290,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Host : localhost:42069\r\n\r\n";
 
-		let _ = match headers.parse_headers(data) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidHeaderWhitespace, err),
 		};
@@ -292,7 +301,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"H\xA9st: localhost:42069\r\n\r\n";
 
-		let _ = match headers.parse_headers(data) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidHeaderChars, err),
 		};
@@ -303,15 +312,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Host: example.com\r\nHost: example.com\r\n\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done);
-		assert_eq!(parsed, 19);
-
-		let _ = match headers.parse_headers(&data[parsed..]) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidDuplicateHeader, err),
 		};
@@ -322,15 +323,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Host: example.com\r\nHost: example.com\r\n\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done);
-		assert_eq!(parsed, 19);
-
-		let _ = match headers.parse_headers(&data[parsed..]) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidDuplicateHeader, err),
 		};
@@ -341,15 +334,7 @@ mod tests {
 		let mut headers = Headers::new();
 		let data: &[u8] = b"Content-Length: 23\r\nContent-Length: 45\r\n";
 
-		let (parsed, done) = match headers.parse_headers(data) {
-			Ok(tup) => tup,
-			Err(err) => panic!("expected parsed bytes, received error: {err}"),
-		};
-
-		assert!(!done);
-		assert_eq!(parsed, 20);
-
-		let _ = match headers.parse_headers(&data[parsed..]) {
+		let _ = match headers.parse(data) {
 			Ok(tup) => panic!("expected error, received: {tup:?}"),
 			Err(err) => assert_eq!(HttpParseError::InvalidDuplicateHeader, err),
 		};
