@@ -21,12 +21,23 @@ pub fn serve() {
 			Err(err) => panic!("Error with parsed request {err}"),
 		};
 
-		let request_line = match request.request_line {
-			Some(line) => line,
-			None => panic!("No request line found"),
-		};
+		println!(
+			"Request line:\n- Method: {}\n- Target: {}\n- Version: {}\nHeaders:",
+			request.method.unwrap(),
+			request.request_target,
+			request.http_version,
+		);
 
-		println!("{request_line}");
+		for key in request.headers.field_lines.keys() {
+			println!("- {}: {}", &*key, request.headers.get(key));
+		}
+
+		if !request.body.is_empty() {
+			println!(
+				"Body:\n{}",
+				std::str::from_utf8(&*request.body.to_vec()).unwrap()
+			);
+		}
 
 		if request.state == ParseState::Done {
 			break;

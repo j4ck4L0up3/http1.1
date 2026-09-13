@@ -18,6 +18,7 @@ const BUFFER_SIZE: usize = 8;
 pub enum ParseState {
 	Initialized,
 	ParsingHeaders,
+	ParsingBody,
 	Done,
 }
 
@@ -27,6 +28,7 @@ pub struct Request {
 	pub request_target: Box<str>,
 	pub http_version: Box<str>,
 	pub headers: Headers,
+	pub body: Box<[u8]>,
 	pub state: ParseState,
 }
 
@@ -44,13 +46,6 @@ impl Request {
 				Ok(n) => n,
 				Err(_) => return Err(HttpParseError::RequestLineParseError),
 			};
-
-			if read == 0 {
-				if request.state == ParseState::ParsingHeaders {
-					return Err(HttpParseError::MissingEndOfHeaders);
-				}
-				break;
-			}
 			
 			read_idx += read;
 
@@ -70,6 +65,17 @@ impl Request {
 				read_idx -= parsed;
 			}
 			
+			if read == 0 {
+				if request.state == ParseState::ParsingHeaders {
+					return Err(HttpParseError::MissingEndOfHeaders);
+				}
+
+				if request.state == ParseState::ParsingBody {
+					return Err(HttpParseError::InvalidPartialContent);
+				}
+				
+				break;
+			}
 		}
 
 		Ok(request)
@@ -81,6 +87,7 @@ impl Request {
 			request_target: String::new().into_boxed_str(),
 			http_version: String::new().into_boxed_str(),
 			headers: Headers::new(),
+			body: Box::new(*b""),
 			state: ParseState::Initialized
 		}
 	}
@@ -119,8 +126,31 @@ impl Request {
 			let done = results.1;
 
 			if done && bytes_read > 0 {
-				self.state = ParseState::Done;
+				self.state = ParseState::ParsingBody;
 			}
+		} else if self.state == ParseState::ParsingBody {
+			let content_len = self.headers.get("Content-Length");
+			if content_len == "" {
+				self.state = ParseState::Done;
+				return Ok(bytes_read);
+			}
+
+			let length: usize = match content_len.parse::<usize>() {
+					Ok(l) => l,
+					Err(_) => return Err(HttpParseError::NonIntegerContentLength),
+				};
+
+			let parsed = match self.parse_body(length, data) {
+				Ok(tup) => tup,
+				Err(err) => return Err(err),
+			};
+
+			bytes_read += parsed;
+			if parsed < length {
+				return Ok(bytes_read);
+			}
+
+			self.state = ParseState::Done;
 		} else if self.state == ParseState::Done {
 			return Err(HttpParseError::ReadingDoneParser);
 		} else {
@@ -128,6 +158,22 @@ impl Request {
 		}
 
 		Ok(bytes_read)
+	}
+
+	fn parse_body(&mut self, length: usize, data: &[u8]) -> Result<usize, HttpParseError> {
+		let trimmed: &[u8] = &data[..data.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1)];
+		let parsed: usize = trimmed.len();
+
+		if parsed < length {
+			return Ok(0);
+		}
+
+		if parsed > length {
+			return Err(HttpParseError::InvalidPartialContent);
+		}
+
+		self.body = Box::from(trimmed);
+		Ok(parsed)
 	}
 }
 
@@ -251,6 +297,7 @@ mod tests {
 			assert_eq!(headers.get("accept"), "*/*");
 			assert_eq!(headers.get("content-type"), "application/json");
 			assert_eq!(headers.get("content-length"), "22");
+			assert_eq!(&*request.body, b"{\"flavor\":\"dark mode\"}");
 		}
 	}
 
@@ -309,6 +356,36 @@ mod tests {
 			// also testing get here for case insensitivity
 			assert_eq!(headers.get("Host"), "localhost:7878"); 
 			assert_eq!(headers.get("Set-Cookie"), "very=cool, nice=guy");
+		}
+	}
+
+	#[test]
+	fn valid_empty_body_zero_content_length() {
+		let request_line = 
+			b"GET /coffee HTTP/1.1\r\nHost: localhost:7878\r\nContent-Length: 0\r\n\r\n";
+
+		for i in 1..request_line.len() {
+			let reader = ChunkReader {
+				data: request_line,
+				bytes_per_read: i,
+				pos: 0,
+			};
+			let reader = BufReader::new(reader);
+
+			let request = match Request::from_reader(reader) {
+				Ok(req) => req,
+				Err(err) => panic!("expected request, got error: {err}"),
+			};
+
+			let headers = request.headers;
+
+			assert_eq!(Method::GET, request.method.unwrap());
+			assert_eq!("/coffee", &*request.request_target);
+			assert_eq!(HTTP_VERSION, &*request.http_version);
+
+			assert_eq!(headers.get("host"), "localhost:7878"); 
+			assert_eq!(headers.get("content-length"), "0");
+			assert_eq!(&*request.body, b"");
 		}
 	}
 
@@ -492,5 +569,43 @@ mod tests {
 				Ok(req) => panic!("expected error, received: {req:?}"),
 				Err(err) => assert_eq!(HttpParseError::MissingEndOfHeaders, err),
 			};
+	}
+
+	#[test]
+	fn invalid_partial_content() {
+		let request_line = 
+			b"POST /submit HTTP/1.1\r\nHost: localhost:42069\r\nContent-Length: 20\r\n\r\npartial content";
+
+		let reader = ChunkReader {
+			data: request_line,
+			bytes_per_read: 3,
+			pos: 0,
+		};
+		let reader = BufReader::new(reader);
+
+		let _ = match Request::from_reader(reader) {
+			Ok(req) => panic!("expected error, received: {req:?}"),
+			Err(err) => assert_eq!(HttpParseError::InvalidPartialContent, err),
+		};
+	}
+
+	#[test]
+	fn body_with_no_content_length() {
+		let request_line =
+			b"POST /coffee HTTP/1.1\r\nHost: localhost:7878\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\nContent-Type: application/json\r\n\r\n{\"flavor\":\"dark mode\"}";
+
+		let reader = ChunkReader {
+			data: request_line,
+			bytes_per_read: 3,
+			pos: 0,
+		};
+		let reader = BufReader::new(reader);
+
+		let request = match Request::from_reader(reader) {
+			Ok(req) => req, 
+			Err(err) => panic!("expected parsed request, received error: {err}"),
+		};
+
+		assert_eq!(&*request.body, b"");
 	}
 }

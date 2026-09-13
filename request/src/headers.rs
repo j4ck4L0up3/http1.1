@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Headers {
-	field_lines: HashMap<Box<str>, Vec<Box<str>>>,
+	pub field_lines: HashMap<Box<str>, Vec<Box<str>>>,
 }
 
 impl Headers {
@@ -14,8 +14,14 @@ impl Headers {
 	}
 
 	pub fn get(&self, header: &str) -> String {
-		let field_values = &self.field_lines[&header.to_lowercase().into_boxed_str()];
 		let mut value = String::new();
+		let field_values = match self
+			.field_lines
+			.get(&header.to_lowercase().into_boxed_str())
+		{
+			Some(vals) => vals,
+			None => return value,
+		};
 
 		if field_values.len() > 1 {
 			for i in 0..field_values.len() {

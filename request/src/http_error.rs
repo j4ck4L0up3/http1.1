@@ -14,6 +14,8 @@ pub enum HttpParseError {
 	InvalidDuplicateHeader,
 	EmptyFieldValue,
 	MissingEndOfHeaders,
+	NonIntegerContentLength,
+	InvalidPartialContent,
 	InvalidASCII,
 	ReadingDoneParser,
 	UnknownParserState,
@@ -40,6 +42,15 @@ impl fmt::Display for HttpParseError {
 			}
 			HttpParseError::EmptyFieldValue => write!(f, "empty field value passed in header"),
 			HttpParseError::MissingEndOfHeaders => write!(f, "missing CRLF at end of headers"),
+			HttpParseError::NonIntegerContentLength => {
+				write!(
+					f,
+					"non-integer value passed in Content-Length header(s); unsigned integer expected"
+				)
+			}
+			HttpParseError::InvalidPartialContent => {
+				write!(f, "invalid content-length or partial content")
+			}
 			HttpParseError::InvalidASCII => write!(f, "non-ASCII bytes passed in request"),
 			HttpParseError::ReadingDoneParser => write!(f, "reading when parser is in done state"),
 			HttpParseError::UnknownParserState => write!(f, "unknown parser state"),
