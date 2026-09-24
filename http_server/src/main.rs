@@ -2,10 +2,9 @@ use ctrlc;
 use http_server::Server;
 use std::{
 	io::Write,
-	sync::{atomic::AtomicBool},
 };
 
-use tokio::{runtime::Runtime, self};
+use tokio::{runtime::Runtime,self, sync::broadcast};
 
 const PORT: u16 = 7878;
 
@@ -17,9 +16,10 @@ fn main() {
 
 	rt.block_on(async {
 		// wait for ctrl-c
-		let (tx, rx) = tokio::sync::mpsc::channel(1);
+		let (tx, sig) = broadcast::channel(1);
+		let mut rx = tx.subscribe();
 
-		let server = match Server::serve(PORT, rx) {
+		let server = match Server::serve(PORT, sig) {
 			Ok(s) => s,
 			Err(e) => {
 				eprintln!("Error starting server: {}", e);
@@ -29,12 +29,14 @@ fn main() {
 
 		println!("Server started on port {}", PORT);
 		ctrlc::set_handler(move || {
-			match tx.blocking_send(AtomicBool::new(false)) {
+			match tx.send(false) {
 				Ok(_) => (),
 				Err(err) => panic!("unable to send graceful shutdown signal, forcing shutdown: {err}"),
 			};
 		})
 		.expect("Error setting Ctrl-C handler");
+
+		rx.recv().await.expect("something went wrong while waiting to receive graceful shutdown signal");
 
 		std::io::stdout().flush().unwrap();
 		drop(server);

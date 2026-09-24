@@ -1,18 +1,23 @@
 use request::Request;
 use std::{
-	io::{BufReader, Error}, net::{IpAddr, Ipv4Addr, TcpListener, TcpStream}, sync::atomic::AtomicBool, thread, time::Duration,
+	io::{BufReader, Error},
+	net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
+	sync::{Arc, atomic::{AtomicBool, Ordering}},
+	thread,
+	time::Duration,
 };
-use tokio::{sync::mpsc::{Receiver, error::TryRecvError}, self, task::JoinHandle};
+use tokio::{sync::broadcast::{Receiver, error::TryRecvError}, self, task::JoinHandle};
 
+#[derive(Debug)]
 pub struct Server {
-	pub listening: AtomicBool,
+	pub listening: Arc<AtomicBool>,
 	pub ip_addr: IpAddr,
 	pub port: u16,
 	handle: JoinHandle<()>,
 }
 
 impl Server {
-	pub fn serve(port: u16, sig: Receiver<AtomicBool>) -> Result<Server, Error> {
+	pub fn serve(port: u16, sig: Receiver<bool>) -> Result<Server, Error> {
 		let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 		let parsed_port = port.to_string();
 		let address = ip.to_string() + ":" + parsed_port.as_str();
@@ -27,10 +32,12 @@ impl Server {
 		})?;
 
 		listener.set_nonblocking(true)?;
+		let listening = Arc::new(AtomicBool::new(true));
+		let listening_clone = Arc::clone(&listening);
 
-		let handle = tokio::spawn(Self::listen(listener, sig));
+		let handle = tokio::spawn(Self::listen(listener, sig, listening_clone));
 		let server = Server {
-			listening: AtomicBool::new(true),
+			listening,
 			ip_addr: ip,
 			port: port,
 			handle,
@@ -39,19 +46,20 @@ impl Server {
 		Ok(server)
 	}
 
-	async fn listen(listener: TcpListener, mut sig: Receiver<AtomicBool>) {
+	async fn listen(listener: TcpListener, mut sig: Receiver<bool>, flag: Arc<AtomicBool>) {
 		loop {
-			let listening: AtomicBool = sig.try_recv().unwrap_or_else(|err| {
+			let listening: bool = sig.try_recv().unwrap_or_else(|err| {
 				match err {
-					TryRecvError::Empty => AtomicBool::new(true),
+					TryRecvError::Empty => true,
 					_ => {
 						eprintln!("unable to receive graceful shutdown signal, initiating graceful shutdown anyway: {err}");
-						AtomicBool::new(false)
+						false
 					}
 				}
 			}) ;
 
-			if !listening.into_inner() {
+			if !listening {
+				flag.store(listening, Ordering::Release);
 				return;
 			}
 
