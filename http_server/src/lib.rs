@@ -1,10 +1,6 @@
 use request::Request;
 use std::{
-	io::{BufReader, Error},
-	net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
-	sync::{Arc, atomic::{AtomicBool, Ordering}},
-	thread,
-	time::Duration,
+	io::{BufReader, Error, Write}, net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, Shutdown}, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Duration,
 };
 use tokio::{sync::broadcast::{Receiver, error::TryRecvError}, self, task::JoinHandle};
 
@@ -74,8 +70,8 @@ impl Server {
 		}
 	}
 
-	fn handle(stream: TcpStream) {
-		let reader = BufReader::new(stream);
+	fn handle(mut stream: TcpStream) {
+		let reader = BufReader::new(&stream);
 		let request = match Request::from_reader(reader) {
 			Ok(req) => req,
 			Err(err) => panic!("Error with parsed request {err}"),
@@ -98,6 +94,12 @@ impl Server {
 				std::str::from_utf8(&*request.body.to_vec()).unwrap()
 			);
 		}
+		
+		let response = 
+			b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\nHello World!";
+		
+		let _ = stream.write(response).map_err(|err| eprintln!("unable to write response to TCP connection: {err}"));
+		let _ = stream.shutdown(Shutdown::Both).map_err(|err| eprintln!("unable to close TCP connection: {err}"));
 	}
 }
 
