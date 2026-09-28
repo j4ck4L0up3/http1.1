@@ -1,4 +1,5 @@
 use request::Request;
+use response::Response;
 use std::{
 	io::{BufReader, Error, Write}, net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, Shutdown}, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::Duration,
 };
@@ -95,10 +96,9 @@ impl Server {
 			);
 		}
 		
-		let response = 
-			b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\nHello World!";
+		let response = Response::default();
 		
-		let _ = stream.write(response).map_err(|err| eprintln!("unable to write response to TCP connection: {err}"));
+		let _ = stream.write(&response.as_bytes()).map_err(|err| eprintln!("unable to write response to TCP connection: {err}"));
 		let _ = stream.shutdown(Shutdown::Both).map_err(|err| eprintln!("unable to close TCP connection: {err}"));
 	}
 }

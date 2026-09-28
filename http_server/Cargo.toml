@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 ctrlc = "3.5.2"
 request = { path = "../request" }
+response = { path = "../response" }
 tokio = { version = "1.53.1", features = ["full"]}
